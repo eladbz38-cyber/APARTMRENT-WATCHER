@@ -22,6 +22,23 @@ SEEN_FILE = Path("seen_listings.json")
 YAD2_CITY = "7400"  # Rishon LeZion
 TARGET_NEIGHBORHOODS = ["נחלת יהודה", "האלה", "הלוחמים"]
 
+# Facebook groups to scrape (group IDs or URLs)
+FB_GROUPS = [
+    "https://www.facebook.com/groups/dirot.rishon",
+    "https://www.facebook.com/groups/475698279278222",   # דירות להשכרה ראשון לציון
+    "https://www.facebook.com/groups/1388942934745587",  # נדל"ן ראשון לציון
+    "https://www.facebook.com/groups/rishonlezionrent",
+    "https://www.facebook.com/groups/rishon.apartments",
+    "https://www.facebook.com/groups/nahalyehuda.rent",
+    "https://www.facebook.com/groups/2243438782566887",  # השכרת דירות ראשל"צ
+    "https://www.facebook.com/groups/587145908109887",   # דירות ראשון לציון
+    "https://www.facebook.com/groups/rishonlezionrealestate",
+    "https://www.facebook.com/groups/dirotlehaskara.rishon",
+]
+
+# Keywords to match in Facebook group posts
+FB_KEYWORDS = ["נחלת יהודה", "האלה", "הלוחמים", "להשכרה", "מושכר", "דירה", "ראשון לציון"]
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Accept-Language": "he-IL,he;q=0.9",
@@ -142,7 +159,94 @@ def scrape_madlan():
         print(f"שגיאה במדלן: {e}")
     return listings
 
-# ── Facebook Marketplace scraper ──────────────────────────────────────────────
+# ── Facebook scraper (Marketplace + Groups) ───────────────────────────────────
+def fb_login(page):
+    page.goto("https://www.facebook.com/login", timeout=30000)
+    time.sleep(random.uniform(2, 4))
+    page.fill("#email", FB_EMAIL)
+    page.fill("#pass", FB_PASSWORD)
+    page.click("[name='login']")
+    time.sleep(random.uniform(5, 8))
+
+def scrape_fb_marketplace(page):
+    listings = []
+    try:
+        search_url = (
+            "https://www.facebook.com/marketplace/rishon-lezion/propertyrentals"
+            "?radius=3&latitude=31.9642&longitude=34.8086&topicId=propertyrentals"
+        )
+        page.goto(search_url, timeout=30000)
+        time.sleep(random.uniform(4, 8))
+        items = page.query_selector_all('[aria-label="Marketplace item"]')
+        for item in items[:30]:
+            try:
+                title_text = item.inner_text()
+                link = item.query_selector("a")
+                href = link.get_attribute("href") if link else ""
+                if href and not href.startswith("http"):
+                    href = "https://www.facebook.com" + href
+                listing_id = href.split("/item/")[1].split("/")[0] if "/item/" in href else href[-20:]
+                listings.append({
+                    "id": f"fb_market_{listing_id}",
+                    "source": "Facebook Marketplace",
+                    "city": "ראשון לציון",
+                    "neighborhood": "",
+                    "price": "", "rooms": "", "size": "",
+                    "description": title_text[:200],
+                    "url": href, "contact": "",
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
+            except Exception:
+                continue
+        print(f"  Marketplace: {len(listings)} דירות")
+    except Exception as e:
+        print(f"  שגיאת Marketplace: {e}")
+    return listings
+
+def scrape_fb_group(page, group_url):
+    listings = []
+    try:
+        page.goto(group_url, timeout=30000)
+        time.sleep(random.uniform(4, 7))
+        # Scroll to load more posts
+        for _ in range(3):
+            page.keyboard.press("End")
+            time.sleep(random.uniform(1, 2))
+        posts = page.query_selector_all('[role="article"]')
+        for post in posts[:15]:
+            try:
+                text = post.inner_text()
+                # Only process posts that mention relevant keywords
+                if not any(kw in text for kw in FB_KEYWORDS):
+                    continue
+                # Skip if doesn't mention rental or apartment
+                if "להשכרה" not in text and "דירה" not in text and "חדר" not in text:
+                    continue
+                link_el = post.query_selector("a[href*='/posts/'], a[href*='?story_fbid='], a[href*='/permalink/']")
+                href = ""
+                if link_el:
+                    href = link_el.get_attribute("href") or ""
+                    if not href.startswith("http"):
+                        href = "https://www.facebook.com" + href
+                post_id = href.split("story_fbid=")[1].split("&")[0] if "story_fbid=" in href else href[-20:] or text[:30]
+                listings.append({
+                    "id": f"fb_group_{hash(post_id)}",
+                    "source": f"קבוצת פייסבוק",
+                    "city": "ראשון לציון",
+                    "neighborhood": next((n for n in TARGET_NEIGHBORHOODS if n in text), ""),
+                    "price": "", "rooms": "", "size": "",
+                    "description": text[:300],
+                    "url": href or group_url,
+                    "contact": "",
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
+            except Exception:
+                continue
+        print(f"  קבוצה {group_url.split('/')[-1]}: {len(listings)} פוסטים רלוונטיים")
+    except Exception as e:
+        print(f"  שגיאת קבוצה {group_url}: {e}")
+    return listings
+
 def scrape_facebook():
     if not FB_EMAIL or not FB_PASSWORD:
         print("פייסבוק: לא הוגדרו פרטי התחברות, מדלג")
@@ -151,59 +255,27 @@ def scrape_facebook():
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
             ctx = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
                 locale="he-IL",
             )
             page = ctx.new_page()
+            fb_login(page)
 
-            # Login
-            page.goto("https://www.facebook.com/login", timeout=30000)
-            time.sleep(random.uniform(2, 4))
-            page.fill("#email", FB_EMAIL)
-            page.fill("#pass", FB_PASSWORD)
-            page.click("[name='login']")
-            time.sleep(random.uniform(4, 7))
+            # Marketplace
+            listings += scrape_fb_marketplace(page)
+            time.sleep(random.uniform(3, 5))
 
-            # Search Marketplace
-            search_url = (
-                "https://www.facebook.com/marketplace/rishon-lezion/propertyrentals"
-                "?radius=3&latitude=31.9642&longitude=34.8086&topicId=propertyrentals"
-            )
-            page.goto(search_url, timeout=30000)
-            time.sleep(random.uniform(4, 8))
+            # Groups
+            for group_url in FB_GROUPS:
+                listings += scrape_fb_group(page, group_url)
+                time.sleep(random.uniform(3, 6))
 
-            items = page.query_selector_all('[aria-label="Marketplace item"]')
-            for item in items[:20]:
-                try:
-                    title = item.query_selector("span")
-                    title_text = title.inner_text() if title else ""
-                    link = item.query_selector("a")
-                    href = link.get_attribute("href") if link else ""
-                    if href and not href.startswith("http"):
-                        href = "https://www.facebook.com" + href
-                    listing_id = href.split("/item/")[1].split("/")[0] if "/item/" in href else href
-                    listing = {
-                        "id": f"fb_{listing_id}",
-                        "source": "Facebook Marketplace",
-                        "city": "ראשון לציון",
-                        "neighborhood": "",
-                        "price": "",
-                        "rooms": "",
-                        "size": "",
-                        "description": title_text,
-                        "url": href,
-                        "contact": "",
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    }
-                    listings.append(listing)
-                except Exception:
-                    continue
             browser.close()
-        print(f"פייסבוק: נמצאו {len(listings)} דירות")
+        print(f"פייסבוק סה\"כ: {len(listings)} פוסטים")
     except Exception as e:
-        print(f"שגיאה בפייסבוק: {e}")
+        print(f"שגיאה כללית בפייסבוק: {e}")
     return listings
 
 # ── Main ──────────────────────────────────────────────────────────────────────
