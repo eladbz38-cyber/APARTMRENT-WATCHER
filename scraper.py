@@ -37,6 +37,12 @@ FB_GROUPS = [
 
 FB_KEYWORDS = ["נחלת יהודה", "האלה", "הלוחמים", "להשכרה", "מושכר", "דירה"]
 
+CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 # ── Seen listings ────────────────────────────────────────────────────────────
 def load_seen():
     if SEEN_FILE.exists():
@@ -76,31 +82,109 @@ def send_email(listings: list, subject_prefix=""):
         server.sendmail(GMAIL_USER, NOTIFY_EMAIL, msg.as_string())
     print(f"✅ מייל נשלח עם {len(listings)} דירות")
 
-# ── Yad2 via Playwright (intercept API response) ──────────────────────────
+# ── Yad2 (requests with session cookies) ─────────────────────────────────────
+def scrape_yad2():
+    listings = []
+    try:
+        session = requests.Session()
+        # Warm up the session — get homepage to pick up cookies
+        warm_headers = {
+            "User-Agent": CHROME_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+        }
+        try:
+            session.get("https://www.yad2.co.il/realestate/rent", headers=warm_headers, timeout=10)
+        except Exception:
+            pass
+
+        api_headers = {
+            "User-Agent": CHROME_UA,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "he-IL,he;q=0.9,en-US;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.yad2.co.il/realestate/rent",
+            "Origin": "https://www.yad2.co.il",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+        }
+        url = "https://gw.yad2.co.il/feed-search-legacy/realestate/rent"
+        params = {"city": YAD2_CITY, "priceOnly": "1", "forceLdLoad": "true"}
+        r = session.get(url, params=params, headers=api_headers, timeout=15)
+        print(f"  יד2 API status={r.status_code} size={len(r.content)}B")
+
+        if r.status_code == 200 and r.content:
+            data = r.json()
+            items = data.get("data", {}).get("feed", {}).get("feed_items", [])
+            for item in items:
+                if item.get("type") != "ad":
+                    continue
+                neighborhood = item.get("neighborhood_text", "")
+                address = item.get("address_str", "") + " " + item.get("title_1", "")
+                if not any(n in neighborhood or n in address for n in TARGET_NEIGHBORHOODS):
+                    continue
+                listings.append({
+                    "id": f"yad2_{item.get('id', '')}",
+                    "source": "יד2",
+                    "city": "ראשון לציון",
+                    "neighborhood": neighborhood,
+                    "price": item.get("price", ""),
+                    "rooms": item.get("rooms", ""),
+                    "size": item.get("square_meters", ""),
+                    "description": item.get("title_1", "") + " " + item.get("title_2", ""),
+                    "url": f"https://www.yad2.co.il/item/{item.get('id', '')}",
+                    "contact": item.get("contactName", ""),
+                    "date": item.get("date_added", ""),
+                })
+        else:
+            print(f"  יד2 תגובה: {r.text[:150]}")
+    except Exception as e:
+        print(f"שגיאה ביד2: {e}")
+    print(f"יד2: {len(listings)} דירות")
+    return listings
+
+# ── Yad2 via Playwright (fallback — intercepts the XHR the page itself makes) ─
 def scrape_yad2_playwright(page):
     listings = []
-    api_responses = []
+    api_hits = []
 
     def on_response(response):
-        if "feed-search-legacy/realestate/rent" in response.url:
-            try:
-                api_responses.append(response.json())
-            except Exception:
-                pass
+        url = response.url
+        if "gw.yad2.co.il" in url:
+            print(f"    yad2 xhr: {url[:100]} [{response.status}]")
+            if "feed-search-legacy" in url:
+                try:
+                    api_hits.append(response.json())
+                except Exception:
+                    pass
 
     page.on("response", on_response)
     try:
         page.goto(
             f"https://www.yad2.co.il/realestate/rent?city={YAD2_CITY}",
             timeout=30000,
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
         )
-        time.sleep(random.uniform(3, 5))
+        time.sleep(random.uniform(5, 7))
+        # Dismiss consent/cookie popups
+        for sel in ["button:has-text('אישור')", "button:has-text('הסכמה')",
+                    "button:has-text('קבל')", "#onetrust-accept-btn-handler"]:
+            try:
+                page.click(sel, timeout=2000)
+            except Exception:
+                pass
+        time.sleep(2)
+        # Scroll to trigger lazy-load
+        page.keyboard.press("End")
+        time.sleep(3)
     except Exception as e:
-        print(f"  יד2 navigation: {e}")
+        print(f"  יד2 playwright navigation: {e}")
     page.remove_listener("response", on_response)
 
-    for data in api_responses:
+    print(f"  יד2 playwright: {len(api_hits)} API hits")
+    for data in api_hits:
         items = data.get("data", {}).get("feed", {}).get("feed_items", [])
         for item in items:
             if item.get("type") != "ad":
@@ -122,10 +206,9 @@ def scrape_yad2_playwright(page):
                 "contact": item.get("contactName", ""),
                 "date": item.get("date_added", ""),
             })
-    print(f"יד2: {len(listings)} דירות (מתוך {len(api_responses)} תגובות API)")
     return listings
 
-# ── Madlan via Playwright ─────────────────────────────────────────────────
+# ── Madlan via Playwright ─────────────────────────────────────────────────────
 def scrape_madlan_playwright(page):
     listings = []
     try:
@@ -134,18 +217,17 @@ def scrape_madlan_playwright(page):
             timeout=30000,
             wait_until="domcontentloaded",
         )
-        time.sleep(random.uniform(3, 5))
-        # Extract __NEXT_DATA__ JSON embedded in the page
-        next_data = page.evaluate("""
-            () => {
-                const el = document.getElementById('__NEXT_DATA__');
-                return el ? el.textContent : null;
-            }
-        """)
-        if next_data:
-            data = json.loads(next_data)
+        time.sleep(random.uniform(4, 6))
+        title = page.title()
+        print(f"  מדלן page title: {title[:60]}")
+
+        next_data_str = page.evaluate(
+            "() => { const el = document.getElementById('__NEXT_DATA__'); return el ? el.textContent : null; }"
+        )
+        if next_data_str:
+            data = json.loads(next_data_str)
             props = data.get("props", {}).get("pageProps", {})
-            # Try different keys where listings might be
+            print(f"  מדלן pageProps keys: {list(props.keys())[:8]}")
             items = (
                 props.get("listings")
                 or props.get("items")
@@ -154,10 +236,8 @@ def scrape_madlan_playwright(page):
             )
             for item in items[:30]:
                 lid = str(item.get("id", item.get("listingId", "")))
-                neighborhood = ""
                 nb = item.get("neighborhood", {})
-                if isinstance(nb, dict):
-                    neighborhood = nb.get("name", "נחלת יהודה")
+                neighborhood = nb.get("name", "") if isinstance(nb, dict) else ""
                 listings.append({
                     "id": f"madlan_{lid}",
                     "source": "מדלן",
@@ -171,40 +251,52 @@ def scrape_madlan_playwright(page):
                     "contact": "",
                     "date": item.get("publishedAt", ""),
                 })
-        print(f"מדלן: {len(listings)} דירות")
+        else:
+            print("  מדלן: __NEXT_DATA__ לא נמצא")
     except Exception as e:
         print(f"שגיאה במדלן: {e}")
+    print(f"מדלן: {len(listings)} דירות")
     return listings
 
-# ── Facebook ──────────────────────────────────────────────────────────────────
+# ── Facebook login ────────────────────────────────────────────────────────────
 def fb_login(page):
     from playwright.sync_api import TimeoutError as PWTimeout
-    # Go directly to login page
-    page.goto("https://www.facebook.com/login", timeout=30000)
+    page.goto("https://www.facebook.com/login/", timeout=30000)
     time.sleep(random.uniform(3, 5))
-    # Close cookie banner if present
-    for selector in [
+
+    # Dismiss cookie / consent banners
+    for sel in [
         '[data-testid="cookie-policy-manage-dialog-accept-button"]',
         "button:has-text('Allow all cookies')",
         "button:has-text('Accept all')",
         "button:has-text('OK')",
+        "[aria-label='Allow all cookies']",
     ]:
         try:
-            page.click(selector, timeout=3000)
+            page.click(sel, timeout=2000)
             time.sleep(1)
         except Exception:
             pass
-    try:
-        page.wait_for_selector("#email", timeout=15000)
-        page.fill("#email", FB_EMAIL)
-        time.sleep(random.uniform(0.5, 1.0))
-        page.fill("#pass", FB_PASSWORD)
-        time.sleep(random.uniform(0.5, 1.0))
-        page.click("[name='login']")
-        time.sleep(random.uniform(6, 9))
-        print("  פייסבוק: התחברות בוצעה")
-    except PWTimeout:
-        print("  פייסבוק: דף login לא נמצא, ממשיך...")
+
+    # Try multiple selectors for the email field
+    logged_in = False
+    for email_sel in ["#email", "input[name='email']", "input[type='email']"]:
+        try:
+            page.wait_for_selector(email_sel, timeout=8000)
+            page.fill(email_sel, FB_EMAIL)
+            time.sleep(random.uniform(0.5, 1.0))
+            page.fill("#pass", FB_PASSWORD)
+            time.sleep(random.uniform(0.5, 1.0))
+            page.click("[name='login']")
+            time.sleep(random.uniform(7, 10))
+            logged_in = True
+            print("  פייסבוק: התחברות בוצעה")
+            break
+        except Exception:
+            continue
+
+    if not logged_in:
+        print(f"  פייסבוק: login נכשל, URL={page.url[:80]}")
 
 def scrape_fb_marketplace(page):
     listings = []
@@ -262,7 +354,9 @@ def scrape_fb_group(page, group_url):
                     continue
                 if "להשכרה" not in text and "דירה" not in text and "חדר" not in text:
                     continue
-                link_el = post.query_selector("a[href*='/posts/'], a[href*='story_fbid'], a[href*='/permalink/']")
+                link_el = post.query_selector(
+                    "a[href*='/posts/'], a[href*='story_fbid'], a[href*='/permalink/']"
+                )
                 href = ""
                 if link_el:
                     href = link_el.get_attribute("href") or ""
@@ -287,7 +381,7 @@ def scrape_fb_group(page, group_url):
         print(f"  שגיאת קבוצה: {e}")
     return listings
 
-# ── Main Playwright session (Yad2 + Madlan + Facebook) ───────────────────
+# ── Main Playwright session ───────────────────────────────────────────────────
 def scrape_all_playwright():
     listings = []
     try:
@@ -303,27 +397,20 @@ def scrape_all_playwright():
                 ]
             )
             ctx = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
+                user_agent=CHROME_UA,
                 locale="he-IL",
                 viewport={"width": 1280, "height": 800},
             )
             page = ctx.new_page()
 
-            # Yad2 (intercept API)
-            yad2_listings = scrape_yad2_playwright(page)
-            listings += yad2_listings
+            yad2_pl = scrape_yad2_playwright(page)
+            listings += yad2_pl
             time.sleep(random.uniform(2, 4))
 
-            # Madlan
-            madlan_listings = scrape_madlan_playwright(page)
-            listings += madlan_listings
+            madlan = scrape_madlan_playwright(page)
+            listings += madlan
             time.sleep(random.uniform(2, 4))
 
-            # Facebook
             if FB_EMAIL and FB_PASSWORD:
                 fb_login(page)
                 listings += scrape_fb_marketplace(page)
@@ -331,8 +418,6 @@ def scrape_all_playwright():
                 for group_url in FB_GROUPS:
                     listings += scrape_fb_group(page, group_url)
                     time.sleep(random.uniform(2, 4))
-                fb_total = len(listings) - len(yad2_listings) - len(madlan_listings)
-                print(f"פייסבוק סה\"כ: {fb_total}")
             else:
                 print("פייסבוק: אין פרטי התחברות")
 
@@ -347,7 +432,17 @@ def main():
     seen = load_seen()
     is_first_run = len(seen) == 0
 
-    all_listings = scrape_all_playwright()
+    # 1. Try Yad2 directly with a requests session (faster, works if not IP-blocked)
+    yad2_direct = scrape_yad2()
+
+    # 2. Run Playwright for Yad2 fallback + Madlan + Facebook
+    playwright_listings = scrape_all_playwright()
+
+    # Merge — prefer direct Yad2 if it found something
+    all_listings = yad2_direct + [l for l in playwright_listings if not l["id"].startswith("yad2_")]
+    if not yad2_direct:
+        # Include playwright's yad2 results too
+        all_listings = playwright_listings
 
     print(f"סה\"כ נמצאו: {len(all_listings)} דירות מכל המקורות")
 
