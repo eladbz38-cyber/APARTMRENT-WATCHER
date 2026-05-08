@@ -228,42 +228,30 @@ def scrape_yad2_playwright(page):
                 props = nd.get("props", {}).get("pageProps", {})
                 print(f"  יד2 __NEXT_DATA__ מפתחות: {list(props.keys())[:10]}")
 
-                # Check 'feed' key directly
-                feed_val = props.get("feed")
-                if feed_val:
-                    feed_type = type(feed_val).__name__
-                    feed_keys = list(feed_val.keys())[:10] if isinstance(feed_val, dict) else "not-dict"
-                    print(f"  יד2 feed type={feed_type} keys={feed_keys}")
+                # 'feed' is a dict with category keys: private, agency, yad1, platinum, etc.
+                feed_val = props.get("feed") or {}
+                if feed_val and isinstance(feed_val, dict):
+                    print(f"  יד2 feed keys={list(feed_val.keys())[:12]}")
 
-                items_nd = (
-                    props.get("feedItems")
-                    or props.get("feed_items")
-                    or props.get("listings")
-                    or props.get("items")
-                    or (feed_val or {}).get("feed_items", [])
-                    or (feed_val or {}).get("items", [])
-                    or []
-                )
+                # Collect listings from all feed category keys (skip 'pagination')
+                SKIP_KEYS = {"pagination", "total_pages", "total_items", "page"}
+                items_nd = []
+                for cat_key, cat_val in feed_val.items():
+                    if cat_key in SKIP_KEYS:
+                        continue
+                    if isinstance(cat_val, list):
+                        items_nd.extend(cat_val)
+                    elif isinstance(cat_val, dict):
+                        items_nd.extend(cat_val.get("items", []) or cat_val.get("feed_items", []))
 
-                # Also search TanStack Query dehydratedState cache
                 if not items_nd:
-                    dehydrated = props.get("dehydratedState", {})
-                    queries = dehydrated.get("queries", [])
-                    print(f"  יד2 dehydratedState: {len(queries)} queries")
-                    for q in queries:
-                        qdata = q.get("state", {}).get("data", {})
-                        # Try multiple nesting paths
-                        found = (
-                            qdata.get("data", {}).get("feed", {}).get("feed_items", [])
-                            or qdata.get("feed", {}).get("feed_items", [])
-                            or qdata.get("data", {}).get("items", [])
-                            or qdata.get("items", [])
-                            or []
-                        )
-                        if found:
-                            print(f"  יד2 נמצא ב-dehydratedState query: {len(found)} פריטים")
-                            items_nd = found
-                            break
+                    items_nd = (
+                        props.get("feedItems")
+                        or props.get("feed_items")
+                        or props.get("listings")
+                        or props.get("items")
+                        or []
+                    )
 
                 print(f"  יד2 __NEXT_DATA__: {len(items_nd)} פריטים")
                 if items_nd:
@@ -281,25 +269,47 @@ def scrape_yad2_playwright(page):
             or data.get("items", [])
             or []
         )
+        if items:
+            first = items[0]
+            print(f"  יד2 item[0] keys: {list(first.keys())[:15] if isinstance(first, dict) else type(first)}")
         for item in items:
-            if item.get("type") != "ad":
+            if not isinstance(item, dict):
                 continue
-            neighborhood = item.get("neighborhood_text", "")
-            address = item.get("address_str", "") + " " + item.get("title_1", "")
+            # Skip promotional/ad-type items only when 'type' field is explicitly non-ad
+            item_type = item.get("type")
+            if item_type is not None and item_type not in ("ad", "item", "listing", "private", "agency"):
+                continue
+            # Neighborhood from multiple possible field names
+            neighborhood = (
+                item.get("neighborhood_text")
+                or item.get("neighborhood")
+                or item.get("area_text")
+                or ""
+            )
+            address = (
+                item.get("address_str", "")
+                + " " + item.get("title_1", "")
+                + " " + item.get("address", "")
+                + " " + str(item.get("street", ""))
+            )
+            city_val = str(item.get("city_text", "") or item.get("city", "") or "")
             if not any(n in neighborhood or n in address for n in TARGET_NEIGHBORHOODS):
-                continue
+                # If city is Rishon LeZion and no neighborhood info, include anyway
+                if "ראשון" not in city_val and "7400" not in str(item.get("city_id", "")):
+                    continue
+            item_id = item.get("id") or item.get("listing_id") or item.get("orderId") or str(abs(hash(str(item)[:80])))
             listings.append({
-                "id": f"yad2_{item.get('id', '')}",
+                "id": f"yad2_{item_id}",
                 "source": "יד2",
                 "city": "ראשון לציון",
                 "neighborhood": neighborhood,
-                "price": item.get("price", ""),
-                "rooms": item.get("rooms", ""),
-                "size": item.get("square_meters", ""),
-                "description": item.get("title_1", "") + " " + item.get("title_2", ""),
-                "url": f"https://www.yad2.co.il/item/{item.get('id', '')}",
-                "contact": item.get("contactName", ""),
-                "date": item.get("date_added", ""),
+                "price": item.get("price") or item.get("rent_price") or "",
+                "rooms": item.get("rooms") or item.get("roomsCount") or "",
+                "size": item.get("square_meters") or item.get("squareMeter") or item.get("squareMeters") or "",
+                "description": (item.get("title_1") or item.get("title") or "") + " " + (item.get("title_2") or item.get("subtitle") or ""),
+                "url": f"https://www.yad2.co.il/item/{item_id}",
+                "contact": item.get("contactName") or item.get("contact_name") or "",
+                "date": item.get("date_added") or item.get("date") or item.get("updated_at") or "",
             })
     return listings
 
