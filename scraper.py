@@ -19,7 +19,7 @@ FB_PASSWORD = os.environ.get("FB_PASSWORD", "")
 
 SEEN_FILE = Path("seen_listings.json")
 
-YAD2_CITY = "7400"  # Rishon LeZion
+YAD2_CITY = "7900"  # Rishon LeZion (CBS city code)
 TARGET_NEIGHBORHOODS = ["נחלת יהודה", "האלה", "הלוחמים"]
 
 FB_GROUPS = [
