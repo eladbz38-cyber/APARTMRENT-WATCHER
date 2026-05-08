@@ -227,14 +227,44 @@ def scrape_yad2_playwright(page):
                 nd = json.loads(next_data_str)
                 props = nd.get("props", {}).get("pageProps", {})
                 print(f"  יד2 __NEXT_DATA__ מפתחות: {list(props.keys())[:10]}")
+
+                # Check 'feed' key directly
+                feed_val = props.get("feed")
+                if feed_val:
+                    feed_type = type(feed_val).__name__
+                    feed_keys = list(feed_val.keys())[:10] if isinstance(feed_val, dict) else "not-dict"
+                    print(f"  יד2 feed type={feed_type} keys={feed_keys}")
+
                 items_nd = (
                     props.get("feedItems")
                     or props.get("feed_items")
                     or props.get("listings")
                     or props.get("items")
-                    or (props.get("feed") or {}).get("feed_items", [])
+                    or (feed_val or {}).get("feed_items", [])
+                    or (feed_val or {}).get("items", [])
                     or []
                 )
+
+                # Also search TanStack Query dehydratedState cache
+                if not items_nd:
+                    dehydrated = props.get("dehydratedState", {})
+                    queries = dehydrated.get("queries", [])
+                    print(f"  יד2 dehydratedState: {len(queries)} queries")
+                    for q in queries:
+                        qdata = q.get("state", {}).get("data", {})
+                        # Try multiple nesting paths
+                        found = (
+                            qdata.get("data", {}).get("feed", {}).get("feed_items", [])
+                            or qdata.get("feed", {}).get("feed_items", [])
+                            or qdata.get("data", {}).get("items", [])
+                            or qdata.get("items", [])
+                            or []
+                        )
+                        if found:
+                            print(f"  יד2 נמצא ב-dehydratedState query: {len(found)} פריטים")
+                            items_nd = found
+                            break
+
                 print(f"  יד2 __NEXT_DATA__: {len(items_nd)} פריטים")
                 if items_nd:
                     api_hits.append({"items": items_nd})
