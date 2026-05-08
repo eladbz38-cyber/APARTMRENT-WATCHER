@@ -110,8 +110,8 @@ def scrape_yad2():
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-site",
         }
-        url = "https://gw.yad2.co.il/feed-search-legacy/realestate/rent"
-        params = {"city": YAD2_CITY, "priceOnly": "1", "forceLdLoad": "true"}
+        url = "https://gw.yad2.co.il/realestate-feed/rent"
+        params = {"city": YAD2_CITY, "area": "17", "region": "1"}
         r = session.get(url, params=params, headers=api_headers, timeout=15)
         print(f"  יד2 API status={r.status_code} size={len(r.content)}B")
 
@@ -154,7 +154,13 @@ def scrape_yad2_playwright(page):
         url = response.url
         if "gw.yad2.co.il" in url:
             print(f"    yad2 xhr: {url[:100]} [{response.status}]")
-            if "feed-search-legacy" in url:
+            # Match both old and new feed endpoints
+            if "realestate-feed/rent" in url and "/map" not in url:
+                try:
+                    api_hits.append(response.json())
+                except Exception:
+                    pass
+            elif "feed-search-legacy" in url:
                 try:
                     api_hits.append(response.json())
                 except Exception:
@@ -185,7 +191,13 @@ def scrape_yad2_playwright(page):
 
     print(f"  יד2 playwright: {len(api_hits)} API hits")
     for data in api_hits:
-        items = data.get("data", {}).get("feed", {}).get("feed_items", [])
+        # Support both old feed_items and new data formats
+        items = (
+            data.get("data", {}).get("feed", {}).get("feed_items", [])
+            or data.get("data", {}).get("items", [])
+            or data.get("items", [])
+            or []
+        )
         for item in items:
             if item.get("type") != "ad":
                 continue
