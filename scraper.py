@@ -190,6 +190,59 @@ def scrape_yad2_playwright(page):
     page.remove_listener("response", on_response)
 
     print(f"  יד2 playwright: {len(api_hits)} API hits")
+
+    # Fallback 1: use the browser's auth cookies to fetch the listing API
+    if not api_hits:
+        try:
+            print("  יד2: מנסה fetch מהדפדפן...")
+            api_data = page.evaluate(f"""
+                async () => {{
+                    try {{
+                        const r = await fetch(
+                            'https://gw.yad2.co.il/realestate-feed/rent?city={YAD2_CITY}&area=17&region=1',
+                            {{credentials: 'include', headers: {{Accept: 'application/json'}}}}
+                        );
+                        if (!r.ok) return {{error: r.status + ' ' + r.statusText}};
+                        return await r.json();
+                    }} catch(e) {{
+                        return {{error: String(e)}};
+                    }}
+                }}
+            """)
+            if api_data and not api_data.get("error"):
+                print("  יד2 browser fetch: הצליח!")
+                api_hits.append(api_data)
+            else:
+                print(f"  יד2 browser fetch: נכשל - {api_data}")
+        except Exception as e:
+            print(f"  יד2 browser fetch שגיאה: {e}")
+
+    # Fallback 2: parse __NEXT_DATA__ (Yad2 is Next.js — listings may be SSR'd)
+    if not api_hits:
+        try:
+            next_data_str = page.evaluate(
+                "() => { const el = document.getElementById('__NEXT_DATA__'); return el ? el.textContent : null; }"
+            )
+            if next_data_str:
+                nd = json.loads(next_data_str)
+                props = nd.get("props", {}).get("pageProps", {})
+                print(f"  יד2 __NEXT_DATA__ מפתחות: {list(props.keys())[:10]}")
+                items_nd = (
+                    props.get("feedItems")
+                    or props.get("feed_items")
+                    or props.get("listings")
+                    or props.get("items")
+                    or (props.get("feed") or {}).get("feed_items", [])
+                    or []
+                )
+                print(f"  יד2 __NEXT_DATA__: {len(items_nd)} פריטים")
+                if items_nd:
+                    api_hits.append({"items": items_nd})
+            else:
+                print("  יד2: __NEXT_DATA__ לא נמצא")
+        except Exception as e:
+            print(f"  יד2 __NEXT_DATA__ שגיאה: {e}")
+
     for data in api_hits:
         # Support both old feed_items and new data formats
         items = (
