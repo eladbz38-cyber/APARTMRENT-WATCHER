@@ -1,0 +1,43 @@
+name: Apartment Watcher
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # כל 20 דקות
+  workflow_dispatch:           # הרצה ידנית אם צריך
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Run scraper
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          FB_EMAIL: ${{ secrets.FB_EMAIL }}
+          FB_PASSWORD: ${{ secrets.FB_PASSWORD }}
+        run: python scraper.py
+
+      - name: Save seen listings
+        run: |
+          git config user.name "apartment-bot"
+          git config user.email "bot@apartment-watcher"
+          git add seen_listings.json
+          git diff --staged --quiet || git commit -m "update seen listings"
+          git push
