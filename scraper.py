@@ -272,44 +272,69 @@ def scrape_yad2_playwright(page):
         if items:
             first = items[0]
             print(f"  יד2 item[0] keys: {list(first.keys())[:15] if isinstance(first, dict) else type(first)}")
+            print(f"  יד2 item[0] address: {str(first.get('address', ''))[:150]}")
+            print(f"  יד2 item[0] adType={first.get('adType')} price={first.get('price')}")
         for item in items:
             if not isinstance(item, dict):
                 continue
-            # Skip promotional/ad-type items only when 'type' field is explicitly non-ad
-            item_type = item.get("type")
-            if item_type is not None and item_type not in ("ad", "item", "listing", "private", "agency"):
+            # adType for __NEXT_DATA__ items, type for old API items
+            item_type = item.get("adType") or item.get("type")
+            # Skip only explicitly non-listing types
+            if item_type is not None and str(item_type) in ("banner", "promotion", "sponsored_banner"):
                 continue
-            # Neighborhood from multiple possible field names
-            neighborhood = (
-                item.get("neighborhood_text")
-                or item.get("neighborhood")
-                or item.get("area_text")
-                or ""
-            )
-            address = (
-                item.get("address_str", "")
-                + " " + item.get("title_1", "")
-                + " " + item.get("address", "")
-                + " " + str(item.get("street", ""))
-            )
-            city_val = str(item.get("city_text", "") or item.get("city", "") or "")
-            if not any(n in neighborhood or n in address for n in TARGET_NEIGHBORHOODS):
-                # If city is Rishon LeZion and no neighborhood info, include anyway
+
+            # address can be a dict (from __NEXT_DATA__) or a string (old API)
+            addr_raw = item.get("address") or {}
+            if isinstance(addr_raw, dict):
+                neighborhood = (
+                    addr_raw.get("neighborhood", {}).get("text", "")
+                    if isinstance(addr_raw.get("neighborhood"), dict)
+                    else str(addr_raw.get("neighborhood", ""))
+                )
+                city_val = str(addr_raw.get("city", {}).get("text", "") if isinstance(addr_raw.get("city"), dict) else addr_raw.get("city", ""))
+                street_val = str(addr_raw.get("street", {}).get("text", "") if isinstance(addr_raw.get("street"), dict) else addr_raw.get("street", ""))
+                address_str = f"{street_val} {city_val} {neighborhood}"
+            else:
+                neighborhood = item.get("neighborhood_text") or item.get("neighborhood") or ""
+                city_val = str(item.get("city_text", "") or item.get("city", "") or "")
+                address_str = str(addr_raw) + " " + str(item.get("address_str", "")) + " " + str(item.get("title_1", ""))
+
+            if not any(n in neighborhood or n in address_str for n in TARGET_NEIGHBORHOODS):
                 if "ראשון" not in city_val and "7400" not in str(item.get("city_id", "")):
                     continue
-            item_id = item.get("id") or item.get("listing_id") or item.get("orderId") or str(abs(hash(str(item)[:80])))
+
+            # additionalDetails can hold rooms/size
+            details = item.get("additionalDetails") or {}
+            if not isinstance(details, dict):
+                details = {}
+
+            item_id = (item.get("token") or item.get("id") or item.get("listing_id")
+                       or item.get("orderId") or str(abs(hash(str(item)[:80]))))
+            price_val = item.get("price") or details.get("price") or item.get("rent_price") or ""
+            if isinstance(price_val, dict):
+                price_val = price_val.get("value", "") or price_val.get("text", "") or str(price_val)
+            rooms_val = (item.get("rooms") or details.get("rooms") or
+                         item.get("roomsCount") or details.get("roomsCount") or "")
+            if isinstance(rooms_val, dict):
+                rooms_val = rooms_val.get("value", "") or rooms_val.get("text", "") or str(rooms_val)
+            size_val = (item.get("square_meters") or details.get("squareMeter") or
+                        item.get("squareMeter") or details.get("square_meters") or "")
+            if isinstance(size_val, dict):
+                size_val = size_val.get("value", "") or size_val.get("text", "") or str(size_val)
+            desc_val = (item.get("title_1") or item.get("title") or
+                        item.get("info_text") or str(address_str))
             listings.append({
                 "id": f"yad2_{item_id}",
                 "source": "יד2",
                 "city": "ראשון לציון",
                 "neighborhood": neighborhood,
-                "price": item.get("price") or item.get("rent_price") or "",
-                "rooms": item.get("rooms") or item.get("roomsCount") or "",
-                "size": item.get("square_meters") or item.get("squareMeter") or item.get("squareMeters") or "",
-                "description": (item.get("title_1") or item.get("title") or "") + " " + (item.get("title_2") or item.get("subtitle") or ""),
+                "price": str(price_val),
+                "rooms": str(rooms_val),
+                "size": str(size_val),
+                "description": str(desc_val)[:200],
                 "url": f"https://www.yad2.co.il/item/{item_id}",
-                "contact": item.get("contactName") or item.get("contact_name") or "",
-                "date": item.get("date_added") or item.get("date") or item.get("updated_at") or "",
+                "contact": str(item.get("contactName") or item.get("contact_name") or ""),
+                "date": str(item.get("date_added") or item.get("date") or item.get("updated_at") or ""),
             })
     return listings
 
